@@ -5,3 +5,4 @@ numpy
 anthropic
 nvidia-cublas-cu12; sys_platform == "win32"
 nvidia-cudnn-cu12; sys_platform == "win32"
+onnxruntime

@@ -71,6 +71,7 @@ class Chunk:
     words: list = field(default_factory=list)      # chunk-local times
     segments: list = field(default_factory=list)   # (start, end, text)
     db: np.ndarray | None = None                   # loudness per GRID bin
+    sounds: dict | None = None                     # laugh/applause/music/speech probability per GRID bin
 
 
 @dataclass
@@ -109,6 +110,7 @@ class LiveClipper:
         self.chat_all = 0
         self.chat_started = 0.0
         self.history: list[float] = []
+        self.tagger = None                              # laughter detector (sounds.SoundTagger) when available
         self.trace = None                               # optional callback: sees every scoring step
         self.warned_slow = False
         self.whisper = None
@@ -330,6 +332,10 @@ class LiveClipper:
             raise RuntimeError("The speech-to-text model could not be loaded.")
         self.log(f"Speech-to-text ready: whisper '{self.s.model}' on {'GPU' if self.device == 'cuda' else 'CPU'}.")
         self.encoder = self._pick_encoder()
+        import sounds
+        self.tagger = sounds.load_tagger(self.log)
+        if self.tagger:
+            self.log("Laughter detector ready: applause and music no longer count as laughs.")
         if self.s.use_judge:
             try:
                 import judge
@@ -485,6 +491,11 @@ class LiveClipper:
             return None
         rms = np.sqrt(np.mean(pcm[: n * hop].reshape(n, hop) ** 2, axis=1) + 1e-10)
         c.db = 20 * np.log10(rms + 1e-6)
+        if self.tagger:
+            try:
+                c.sounds = self.tagger.tag(pcm, GRID)
+            except Exception as e:                      # never lose a chunk to the detector
+                self.log(f"Laughter detector skipped a chunk ({str(e)[:100]}).")
 
         t0 = time.time()
         lang = None if self.s.language == "auto" else self.s.language
@@ -532,11 +543,23 @@ class LiveClipper:
         mad = np.median(np.abs(db - med)) * 1.4826 + 1.0
         loud = smooth(np.clip((db - med) / mad, 0, 6), 2.0)
 
-        speaking = np.zeros(nb, dtype=bool)
-        for w in words:
-            speaking[max(0, int((w.start - 0.15) / GRID)): int((w.end + 0.15) / GRID) + 1] = True
-        laugh = np.where(~speaking & (db > med - 3), 2.0 + np.clip((db - med) / mad, 0, 3), 0.0)
-        laugh = smooth(laugh, 2.0)                      # audience or streamer laughing, cheering
+        tagged = all(c.sounds is not None for c, _ in chunks)
+        if tagged:                                      # the laughter detector heard this whole window
+            snd = {k: np.zeros(nb) for k in ("laugh", "applause", "music")}
+            for c, o in chunks:
+                i0 = int((o + c.aoff) / GRID)
+                for k, arr in snd.items():
+                    part = c.sounds[k][: max(0, nb - i0)]
+                    arr[i0:i0 + len(part)] = np.maximum(arr[i0:i0 + len(part)], part)
+            cheer = np.maximum(snd["applause"], snd["music"])
+            loud = loud * (1 - np.clip((cheer - 0.2) / 0.3, 0, 1))   # applause and music are not reactions
+            laugh = smooth(4.0 * np.clip((snd["laugh"] - 0.03) / 0.12, 0, 1), 2.0)
+        else:                                           # no detector: loud while nobody talks
+            speaking = np.zeros(nb, dtype=bool)
+            for w in words:
+                speaking[max(0, int((w.start - 0.15) / GRID)): int((w.end + 0.15) / GRID) + 1] = True
+            laugh = np.where(~speaking & (db > med - 3), 2.0 + np.clip((db - med) / mad, 0, 3), 0.0)
+            laugh = smooth(laugh, 2.0)                  # audience or streamer laughing, cheering
 
         text = np.zeros(nb)
         hits = []
@@ -587,7 +610,7 @@ class LiveClipper:
                 if loud[i] >= 1.5:
                     why.append("loud burst")
                 if laugh[i] >= 1.2:
-                    why.append("laughter or cheering")
+                    why.append("laughter" if tagged else "laughter or cheering")
                 if text[i] >= 0.8:
                     near = sorted({h for t, h in hits if abs(t - p) < 6})
                     why.append("laugh words" + (f" ({', '.join(near[:3])})" if near else ""))

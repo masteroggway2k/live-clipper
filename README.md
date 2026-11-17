@@ -16,11 +16,14 @@ Needs Python 3.10+ and FFmpeg (`winget install Gyan.FFmpeg`). An NVIDIA GPU is u
 
 For every stretch of the stream it combines:
 
-- **Loud bursts** in the audio, which is what laughter and shouting look like
+- **Laughter**, heard by a small sound-recognition model (YAMNet) that tells laughter apart from applause, cheering and music, so an intro or walk-on music is not mistaken for a joke landing
+- **Loud bursts** in the audio, ignored while the model hears applause or music
 - **Laugh words** in the speech ("haha", "lol", "funny", ...)
 - **Live chat**: spikes of viewers typing lol, 😂, 💀 and similar
 
-**How picky** sets how high that combined score must be. These signals find loud, lively moments; they cannot understand a joke.
+**How picky** sets how high that combined score must be. These signals find moments people laugh at; they cannot understand a joke nobody laughs at.
+
+The laughter model (about 14 MB, MIT licence, from Qualcomm AI Hub) downloads the first time you start clipping and is checked against a fixed checksum before it is used. It runs on the CPU and takes well under a second per minute of stream. If it cannot be downloaded, the app falls back to treating any loud stretch without talking as laughter, and says so in the activity log.
 
 ### Better picks with Claude (optional)
 
