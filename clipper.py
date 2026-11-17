@@ -616,7 +616,7 @@ class LiveClipper:
                     why.append("laugh words" + (f" ({', '.join(near[:3])})" if near else ""))
                 if chat[i] >= 0.8:
                     why.append("chat laughing")
-                s, e = snap(segs, p - 13.0, p + 8.0, win_end)
+                s, e = snap(sentences(words) or segs, p - 13.0, p + 8.0, win_end)
                 moments.append({"start": s, "end": e, "score": round(float(zone[i]), 1),
                                 "title": "", "reason": " + ".join(why) or "energy spike"})
                 zone[max(0, i - int(30 / GRID)): i + int(30 / GRID)] = -1
@@ -652,7 +652,7 @@ class LiveClipper:
         need = JUDGE_MIN_SCORE[self.s.sensitivity]
         for m in found:
             if m["score"] >= need and lo <= (m["start"] + m["end"]) / 2 < hi + 5:
-                s, e = snap(segs, m["start"], m["end"], win_end)
+                s, e = snap(sentences(words) or segs, m["start"], m["end"], win_end)
                 out.append({"start": s, "end": e, "score": m["score"], "title": m["title"],
                             "reason": m.get("why", "picked by Claude")})
         return out
@@ -765,6 +765,20 @@ def peaks(x: np.ndarray, level: float) -> list[int]:
 SENTENCE_END = re.compile(r"[.?!…。।][\"')\]]*$")
 
 
+def sentences(words: list[Word]) -> list[tuple]:
+    """(start, end, text) per sentence, split where a word ends with sentence punctuation.
+    Word timings are finer than speech segments, which often run on past a sentence end."""
+    out, cur = [], []
+    for w in words:
+        cur.append(w)
+        if SENTENCE_END.search(w.text.strip()):
+            out.append((cur[0].start, cur[-1].end, " ".join(x.text for x in cur)))
+            cur = []
+    if cur:
+        out.append((cur[0].start, cur[-1].end, " ".join(x.text for x in cur)))
+    return out
+
+
 def snap(segs, s: float, e: float, win_end: float,
          min_len: float = MIN_CLIP, max_len: float = MAX_CLIP):
     """Move clip edges to sentence boundaries so clips do not start or end mid-sentence.
@@ -781,8 +795,20 @@ def snap(segs, s: float, e: float, win_end: float,
             or [b for _, b, _ in segs if e - 2 <= b <= e + 6 and b <= win_end])
     starts = ([a for a in sent_starts if s - 8 <= a <= s + 4]
               or [a for a, _, _ in segs if s - 5 <= a <= s + 3])
-    s_opts = [max(0.0, a - 0.25) for a in starts] or [s]
-    e_opts = [min(win_end, b + 0.5) for b in ends] or [e]
+    # pad a little around the speech, but never into the neighbouring words
+    seg_starts = [a for a, _, _ in segs]
+    seg_ends = [b for _, b, _ in segs]
+
+    def start_pad(a):
+        before = [b for b in seg_ends if b <= a + 1e-6]
+        return min(0.25, max(0.0, a - max(before) - 0.05)) if before else 0.25
+
+    def end_pad(b):
+        after = [a for a in seg_starts if a >= b - 1e-6]
+        return min(0.5, max(0.0, min(after) - b - 0.05)) if after else 0.5
+
+    s_opts = [max(0.0, a - start_pad(a)) for a in starts] or [s]
+    e_opts = [min(win_end, b + end_pad(b)) for b in ends] or [e]
     pairs = sorted(((abs(a - s) + abs(b - e), a, b) for a in s_opts for b in e_opts), key=lambda p: p[0])
     fitting = [p for p in pairs if min_len <= p[2] - p[1] <= max_len]
     _, s, e = (fitting or pairs)[0]

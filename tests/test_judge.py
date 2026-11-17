@@ -8,7 +8,7 @@ import pytest
 import clipper
 import judge
 from conftest import make_clipper
-from test_snap import SEGS, WIN_END, sentence_ends, sentence_starts
+from test_snap import SEGS, WIN_END, on_end, on_start, sentence_ends, sentence_starts
 
 
 class FakeClient:
@@ -86,5 +86,5 @@ def test_ask_judge_filters_and_snaps(tmp_path, monkeypatch):
     out = _ask(tmp_path, monkeypatch, lambda *a, **k: json.loads(json.dumps(picks)))
     assert [m["title"] for m in out] == ["keep"]
     s, e = out[0]["start"], out[0]["end"]
-    assert e == WIN_END or round(e - 0.5, 2) in sentence_ends(SEGS)
-    assert s == 0 or round(s + 0.25, 2) in sentence_starts(SEGS)
+    assert e == WIN_END or on_end(e, sentence_ends(SEGS))
+    assert s == 0 or on_start(s, sentence_starts(SEGS))

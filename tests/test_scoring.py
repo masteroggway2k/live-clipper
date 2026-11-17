@@ -6,6 +6,7 @@ import numpy as np
 
 import clipper
 from conftest import make_clipper
+from test_snap import on_end, on_start
 
 DUR = 60.0
 NB = int(DUR / clipper.GRID)
@@ -56,6 +57,20 @@ def test_applause_is_not_a_moment(tmp_path):
 
 def test_music_is_not_a_moment(tmp_path):
     assert moments(tmp_path, make_chunk(music=0.7)) == []
+
+
+def test_clip_ends_on_a_sentence_inside_a_long_segment(tmp_path):
+    # the speech model often runs several sentences into one segment that ends mid-sentence
+    chunk = make_chunk(laugh=0.3)
+    chunk.segments = [(0.0, 30.0, "This is a line of talk. This is a line of"),
+                      (34.0, DUR, "talk. This is a line of talk. This is a line of")]
+    made = moments(tmp_path, chunk)
+    assert len(made) == 1
+    s, e, _ = made[0]
+    ends = [w.end for w in chunk.words if w.text.endswith(".")]
+    starts = [chunk.words[0].start] + [b.start for a, b in zip(chunk.words, chunk.words[1:]) if a.text.endswith(".")]
+    assert e == DUR or on_end(e, ends)
+    assert s == 0 or on_start(s, starts)
 
 
 def test_without_sound_model_old_rule_still_works(tmp_path):
