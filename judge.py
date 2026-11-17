@@ -6,7 +6,16 @@ from __future__ import annotations
 import json
 import os
 
-MODEL = os.environ.get("CLIPPER_JUDGE_MODEL", "claude-opus-5-5")
+DEFAULT_MODEL = "claude-opus-5-5"
+
+
+class JudgeError(Exception):
+    """The judge gave no usable answer for this stretch (cut off or not valid JSON)."""
+
+
+def model_name() -> str:
+    """Model to use, read on every call so CLIPPER_JUDGE_MODEL can change without a restart."""
+    return os.environ.get("CLIPPER_JUDGE_MODEL") or DEFAULT_MODEL
 
 SCHEMA = {
     "type": "object",
@@ -35,7 +44,7 @@ SYSTEM = """You pick clips for a channel that posts the funniest moments of live
 
 You get the transcript of the last two minutes or so of a stream, with start and end seconds on every line, plus the times of loud audio bursts (often laughter or shouting) and of viewers laughing in live chat. Speech recognition makes mistakes and the transcript may be in any language.
 
-Return the moments a viewer would actually laugh at: a joke that lands, a fail, a ridiculous reaction, an absurd exchange. Each moment must stand on its own, so start it where the setup begins and end it just after the punchline or reaction, 12 to 45 seconds long. Most windows contain nothing worth clipping; return an empty list for those rather than a weak pick.
+Return the moments a viewer would actually laugh at: a joke that lands, a fail, a ridiculous reaction, an absurd exchange. Each moment must stand on its own, so start it where the setup begins and end it just after the punchline or reaction, 12 to 45 seconds long. Most windows contain nothing worth clipping; return an empty list for those rather than a weak pick. Applause, cheering, music and introductions are not funny by themselves; only clip them when a joke or reaction inside them is.
 
 For each moment give: start and end in seconds (using the transcript's clock), a score from 1 to 10 for how funny it is (7 and up means you would post it), a short catchy title in the language of the stream, and a few words on why it is funny."""
 
@@ -45,7 +54,7 @@ def make_judge():
     import anthropic
     try:
         client = anthropic.Anthropic()
-        client.models.retrieve(MODEL)
+        client.models.retrieve(model_name())
     except (anthropic.AuthenticationError, anthropic.PermissionDeniedError, anthropic.APIConnectionError):
         return None
     except anthropic.APIStatusError:
@@ -65,7 +74,7 @@ def find_moments(client, title, lines, lo, hi, win_end, loud_spikes, chat_spikes
         f"the transcript is context that is covered by the neighbouring windows."
     )
     resp = client.beta.messages.create(
-        model=MODEL,
+        model=model_name(),
         max_tokens=8000,
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
@@ -75,5 +84,10 @@ def find_moments(client, title, lines, lo, hi, win_end, loud_spikes, chat_spikes
     )
     if resp.stop_reason == "refusal":
         return []
+    if resp.stop_reason == "max_tokens":
+        raise JudgeError("the answer was cut off")
     text = "".join(b.text for b in resp.content if b.type == "text")
-    return json.loads(text).get("moments", [])
+    try:
+        return json.loads(text).get("moments", [])
+    except (ValueError, AttributeError) as e:
+        raise JudgeError(f"the answer was not valid JSON ({e})") from e
