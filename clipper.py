@@ -31,6 +31,8 @@ QUANTILE = {"low": 0.85, "medium": 0.65, "high": 0.4}           # share of recen
 FLOOR = 1.8                                                  # never clip below this, however quiet the stream
 JUDGE_MIN_SCORE = {"low": 8, "medium": 6, "high": 5}        # Claude score (1-10) needed
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+BOT_CHECK_HELP = ('YouTube is asking this PC to prove it is not a bot. Pick your browser under '
+                  '"If YouTube asks to sign in" and press Start again.')
 
 LAUGH_WORDS = re.compile(
     r"^(a?(ha){2,}h?|(he){2,}|lol+|lmf?ao+|rofl|hilarious|funny|laugh\w*|joke\w*|omg|bruh|wtf|"
@@ -165,6 +167,12 @@ class LiveClipper:
                 except Exception as e:
                     failures += 1
                     msg = str(e).replace("ERROR: ", "")
+                    if "confirm you" in msg and "bot" in msg:   # the apostrophe in YouTube's text varies
+                        if session == 0:
+                            self._fail(BOT_CHECK_HELP)
+                        else:
+                            self.log(BOT_CHECK_HELP)
+                        return
                     if session == 0 or failures >= 3:
                         if session == 0:
                             self._fail(f"Could not open that link: {msg}")
