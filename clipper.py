@@ -106,6 +106,7 @@ class LiveClipper:
         self.chat_all = 0
         self.chat_started = 0.0
         self.history: list[float] = []
+        self.trace = None                               # optional callback: sees every scoring step
         self.warned_slow = False
         self.whisper = None
         self.device = "?"
@@ -588,6 +589,10 @@ class LiveClipper:
                                 "title": "", "reason": " + ".join(why) or "energy spike"})
                 zone[max(0, i - int(30 / GRID)): i + int(30 / GRID)] = -1
 
+        if self.trace:
+            self.trace(dict(lo=lo, hi=hi, win_end=win_end, words=words, segs=segs, db=db, loud=loud,
+                            laugh=laugh, text=text, chat=chat, score=score, moments=[dict(m) for m in moments],
+                            need=locals().get("need"), peak=locals().get("peak")))
         for m in moments:
             s, e = max(0.0, m["start"]), min(win_end, m["end"])
             if e - s < MIN_CLIP:
@@ -698,11 +703,22 @@ def peaks(x: np.ndarray, level: float) -> list[int]:
     return sorted(out)
 
 
+SENTENCE_END = re.compile(r"[.?!…。।][\"')\]]*$")
+
+
 def snap(segs, s: float, e: float, win_end: float):
-    """Move clip edges to sentence boundaries so clips do not start or end mid-sentence."""
+    """Move clip edges to sentence boundaries so clips do not start or end mid-sentence.
+    Speech segments are not sentences (a third end on a comma or mid-phrase), so prefer
+    boundaries where a sentence really ends; use any segment edge only when none is near."""
     s, e = max(0.0, s), min(win_end, e)
-    starts = [a for a, b, _ in segs if s - 5 <= a <= s + 3]
-    ends = [b for a, b, _ in segs if e - 2 <= b <= e + 6]
+    segs = sorted(segs)
+    is_end = [bool(SENTENCE_END.search(t.strip())) for _, _, t in segs]
+    sent_ends = [b for (_, b, _), ok in zip(segs, is_end) if ok and b <= win_end]
+    sent_starts = [segs[k][0] for k in range(len(segs)) if k == 0 or is_end[k - 1]]
+    ends = ([b for b in sent_ends if e - 4 <= b <= e + 8]
+            or [b for _, b, _ in segs if e - 2 <= b <= e + 6 and b <= win_end])
+    starts = ([a for a in sent_starts if s - 8 <= a <= s + 4]
+              or [a for a, _, _ in segs if s - 5 <= a <= s + 3])
     if starts:
         s = max(0.0, min(starts, key=lambda a: abs(a - s)) - 0.25)
     if ends:
