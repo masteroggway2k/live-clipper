@@ -32,6 +32,18 @@ setx ANTHROPIC_API_KEY "your-key"
 
 This uses `claude-opus-5-5` and costs roughly one to two US dollars per hour of stream. Set `CLIPPER_JUDGE_MODEL` (for example to `claude-haiku-5-5`) to use a cheaper model.
 
+## Checking how it picks
+
+Two tools let you record a stretch of a stream once and replay it through the scoring as often as you like:
+
+```
+python tools/record_fixture.py <youtube url> %USERPROFILE%\.live-clipperixtures\my-stream 600
+python tools/replay.py %USERPROFILE%\.live-clipperixtures\my-stream --sensitivity medium
+python tools/replay.py %USERPROFILE%\.live-clipperixtures\my-stream --sensitivity medium --judge
+```
+
+Use the app's Python (`%USERPROFILE%\.live-clipperenv\Scripts\python`). The replay prints the best moments of each minute, what they scored on loudness, laughter, laugh words and chat, the words around them, and the clips it would make. `--judge` lets Claude pick instead (needs the API key), and `--render` also cuts the clips. Recordings stay out of git.
+
 ## Settings
 
 | Setting | What it does |
