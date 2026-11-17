@@ -1,0 +1,7 @@
+flask
+yt-dlp[default]
+faster-whisper
+numpy
+anthropic
+nvidia-cublas-cu12; sys_platform == "win32"
+nvidia-cudnn-cu12; sys_platform == "win32"
