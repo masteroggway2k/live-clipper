@@ -10,7 +10,7 @@ DEFAULT_MODEL = "claude-opus-5-5"
 
 
 class JudgeError(Exception):
-    """The judge gave no usable answer for this stretch (cut off or not valid JSON)."""
+    """The judge gave no usable answer for this stretch (declined, cut off or not valid JSON)."""
 
 
 def model_name() -> str:
@@ -83,7 +83,7 @@ def find_moments(client, title, lines, lo, hi, win_end, loud_spikes, chat_spikes
         output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
     )
     if resp.stop_reason == "refusal":
-        return []
+        raise JudgeError("Claude declined to judge this stretch")
     if resp.stop_reason == "max_tokens":
         raise JudgeError("the answer was cut off")
     text = "".join(b.text for b in resp.content if b.type == "text")

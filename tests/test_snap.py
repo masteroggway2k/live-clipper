@@ -27,6 +27,22 @@ def test_edges_land_on_sentences():
         assert s == 0 or round(s + 0.25, 2) in starts, (p, s)
 
 
+def test_short_pick_grows_to_min_length_on_sentences():
+    # a 12.5 s judge pick that sentence snapping would shrink to 11.65 s (then clamped mid-sentence)
+    s, e = clipper.snap(SEGS, 14.0, 26.5, WIN_END)
+    assert e - s >= clipper.MIN_CLIP
+    assert round(e - 0.5, 2) in sentence_ends(SEGS)
+    assert round(s + 0.25, 2) in sentence_starts(SEGS)
+
+
+def test_long_pick_shrinks_to_max_length_on_sentences():
+    segs = [(t, t + 3.0, f"Sentence {n}.") for n, t in enumerate(range(0, 90, 3))]
+    s, e = clipper.snap(segs, 10.0, 54.8, 90.0)              # nearest sentence edges would give 45.75 s
+    assert e - s <= clipper.MAX_CLIP
+    assert round(e - 0.5, 2) in sentence_ends(segs)
+    assert round(s + 0.25, 2) in sentence_starts(segs)
+
+
 def test_falls_back_to_segment_edge():
     assert clipper.snap([(0, 30, "no punctuation"), (30, 60, "still none")], 5, 28, 60) == (0.0, 30.5)
 

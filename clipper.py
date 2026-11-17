@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import wave
 from collections import deque
 from dataclasses import dataclass, field
@@ -540,7 +541,7 @@ class LiveClipper:
         text = np.zeros(nb)
         hits = []
         for w in words:
-            token = re.sub(r"[^\w]", "", w.text)
+            token = laugh_token(w.text)
             if LAUGH_WORDS.match(token):
                 bump(text, w.start, 2.0, 2.0)
                 hits.append((w.start, token.lower()))
@@ -637,7 +638,7 @@ class LiveClipper:
     def _make_clip(self, chunks: list[Chunk], s: float, e: float, words: list[Word], m: dict):
         n = len(self.clips) + 1
         title = m["title"] or " ".join(w.text for w in words if w.start >= max(s, e - 14))[:60]
-        slug = re.sub(r"[^\w\- ]", "", title).strip().replace(" ", "_")[:40] or "clip"
+        slug = slugify(title)
         out = self.clips_dir / f"clip_{n:03d}_{slug}.mp4"
         vertical = self.s.layout != "horizontal"
         W, H = (1080, 1920) if vertical else (1280, 720)
@@ -678,6 +679,33 @@ class LiveClipper:
 
 
 # ------------------------------------------------------------------- helpers
+def _wordish(ch: str) -> bool:
+    """Letters, digits and combining marks. Vowel signs in Hindi and other Indian scripts are
+    combining marks, which regex \\w does not match, so \\w-based cleaning cut them off."""
+    return ch.isalnum() or unicodedata.category(ch).startswith("M")
+
+
+def laugh_token(text: str) -> str:
+    """A spoken word reduced to its letters, for matching against LAUGH_WORDS."""
+    return "".join(ch for ch in text if _wordish(ch))
+
+
+def trim_word(text: str) -> str:
+    """Caption word without leading punctuation or trailing punctuation (apostrophes and % stay)."""
+    i, j = 0, len(text)
+    while i < j and not _wordish(text[i]):
+        i += 1
+    while j > i and not (_wordish(text[j - 1]) or text[j - 1] in "'’%"):
+        j -= 1
+    return text[i:j]
+
+
+def slugify(title: str) -> str:
+    """File-name-safe version of a clip title (letters, digits, marks, - and _)."""
+    kept = "".join(ch for ch in title if _wordish(ch) or ch in "-_ ")
+    return "_".join(kept.split())[:40] or "clip"
+
+
 def timeline(chunks) -> tuple[list[Word], list[tuple]]:
     """Words and sentences of consecutive chunks on one clock: seconds since the first chunk's
     start, which is also the clock of the filter graph when those chunk files are cut."""
@@ -714,10 +742,13 @@ def peaks(x: np.ndarray, level: float) -> list[int]:
 SENTENCE_END = re.compile(r"[.?!…。।][\"')\]]*$")
 
 
-def snap(segs, s: float, e: float, win_end: float):
+def snap(segs, s: float, e: float, win_end: float,
+         min_len: float = MIN_CLIP, max_len: float = MAX_CLIP):
     """Move clip edges to sentence boundaries so clips do not start or end mid-sentence.
     Speech segments are not sentences (a third end on a comma or mid-phrase), so prefer
-    boundaries where a sentence really ends; use any segment edge only when none is near."""
+    boundaries where a sentence really ends; use any segment edge only when none is near.
+    Of the candidate edges, take the pair closest to the requested ones that keeps the clip
+    between min_len and max_len, so a later length clamp does not cut into a sentence."""
     s, e = max(0.0, s), min(win_end, e)
     segs = sorted(segs)
     is_end = [bool(SENTENCE_END.search(t.strip())) for _, _, t in segs]
@@ -727,10 +758,11 @@ def snap(segs, s: float, e: float, win_end: float):
             or [b for _, b, _ in segs if e - 2 <= b <= e + 6 and b <= win_end])
     starts = ([a for a in sent_starts if s - 8 <= a <= s + 4]
               or [a for a, _, _ in segs if s - 5 <= a <= s + 3])
-    if starts:
-        s = max(0.0, min(starts, key=lambda a: abs(a - s)) - 0.25)
-    if ends:
-        e = min(win_end, min(ends, key=lambda b: abs(b - e)) + 0.5)
+    s_opts = [max(0.0, a - 0.25) for a in starts] or [s]
+    e_opts = [min(win_end, b + 0.5) for b in ends] or [e]
+    pairs = sorted(((abs(a - s) + abs(b - e), a, b) for a in s_opts for b in e_opts), key=lambda p: p[0])
+    fitting = [p for p in pairs if min_len <= p[2] - p[1] <= max_len]
+    _, s, e = (fitting or pairs)[0]
     return s, e
 
 
@@ -746,7 +778,7 @@ def build_ass(words: list[Word], s: float, e: float, W: int, H: int, vertical: b
     clean = []
     for w in words:
         t = re.sub(r"[{}\\]", "", w.text)
-        t = re.sub(r"^[^\w]+|[^\w'’%]+$", "", t)
+        t = trim_word(t)
         if t:
             clean.append((max(0.0, w.start - s), min(e - s, w.end - s), t.upper(), w.text[-1:] in ".?!"))
     latin = all(ord(ch) < 0x250 for _, _, t, _ in clean for ch in t)

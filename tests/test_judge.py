@@ -45,8 +45,10 @@ def test_default_model(monkeypatch):
     assert judge.model_name() == "claude-opus-5-5"
 
 
-def test_refusal_returns_empty():
-    assert _call(FakeClient(stop_reason="refusal", text="")) == []
+def test_refusal_raises():
+    # a declined stretch must fall back to built-in scoring, not silently produce no clips
+    with pytest.raises(judge.JudgeError):
+        _call(FakeClient(stop_reason="refusal", text=""))
 
 
 def test_max_tokens_raises():
