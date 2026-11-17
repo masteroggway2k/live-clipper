@@ -37,12 +37,12 @@ This uses `claude-opus-5-5` and costs roughly one to two US dollars per hour of 
 Two tools let you record a stretch of a stream once and replay it through the scoring as often as you like:
 
 ```
-python tools/record_fixture.py <youtube url> %USERPROFILE%\.live-clipperixtures\my-stream 600
-python tools/replay.py %USERPROFILE%\.live-clipperixtures\my-stream --sensitivity medium
-python tools/replay.py %USERPROFILE%\.live-clipperixtures\my-stream --sensitivity medium --judge
+python tools/record_fixture.py <youtube url> %USERPROFILE%\.live-clipper\fixtures\my-stream 600
+python tools/replay.py %USERPROFILE%\.live-clipper\fixtures\my-stream --sensitivity medium
+python tools/replay.py %USERPROFILE%\.live-clipper\fixtures\my-stream --sensitivity medium --judge
 ```
 
-Use the app's Python (`%USERPROFILE%\.live-clipperenv\Scripts\python`). The replay prints the best moments of each minute, what they scored on loudness, laughter, laugh words and chat, the words around them, and the clips it would make. `--judge` lets Claude pick instead (needs the API key), and `--render` also cuts the clips. Recordings stay out of git.
+Use the app's Python (`%USERPROFILE%\.live-clipper\venv\Scripts\python`). The replay prints the best moments of each minute, what they scored on loudness, laughter, laugh words and chat, the words around them, and the clips it would make. `--judge` lets Claude pick instead (needs the API key), and `--render` also cuts the clips. Recordings stay out of git.
 
 ## Settings
 
