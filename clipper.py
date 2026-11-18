@@ -40,11 +40,30 @@ LAUGH_WORDS = re.compile(
     r"crazy|insane|ridiculous|stupid|idiot|dead|dying|हाहा\w*|मज़ाक|मजाक|पागल)$",
     re.IGNORECASE,
 )
-CHAT_LAUGH = re.compile(
-    r"(lol|lmf?ao|rofl|haha|hehe|xd+\b|kek|dead|funny|hilarious|clip (it|that)|"
-    r"😂|🤣|💀|😆|😹|:rolling_on_the_floor_laughing:|:face_with_tears_of_joy:|:skull:|हाहा)",
+# Chat reactions. Strong ones say "I am really laughing"; mild ones are polite amusement.
+CHAT_STRONG = re.compile(
+    r"\b(lmf?a+o+|rofl|dead|dying|i'?m crying|hilarious|clip (it|that)|a?ha(ha){2,}h?)\b"
+    r"|\U0001F923|\U0001F480|:rolling_on_the_floor_laughing:|:skull:|(हा){3,}",
     re.IGNORECASE,
 )
+CHAT_MILD = re.compile(
+    r"\b(lo+l+|a?haha|he(he)+|xd+|kek|funny)\b"
+    r"|\U0001F602|\U0001F606|\U0001F639|\U0001F605|:face_with_tears_of_joy:|(हा){2}",
+    re.IGNORECASE,
+)
+CHAT_WORD = re.compile(r"\b(lo+l+|lmf?a+o+|rofl|a?ha(ha)+h?|he(he)+|dead)\b", re.IGNORECASE)
+LAUGH_EMOJI = re.compile("[\U0001F602\U0001F923\U0001F480\U0001F606\U0001F639\U0001F605]")
+
+
+def chat_weight(text: str) -> float:
+    """How hard a chat message laughs: 0 (not a reaction), 1 (mild), 3 (strong); shouting it in
+    capitals adds 1 and every extra laugh emoji adds 0.5, up to 6."""
+    base = 3.0 if CHAT_STRONG.search(text) else 1.0 if CHAT_MILD.search(text) else 0.0
+    if not base:
+        return 0.0
+    caps = any(m.group().isupper() and len(m.group()) >= 3 for m in CHAT_WORD.finditer(text))
+    emojis = len(LAUGH_EMOJI.findall(text))
+    return min(6.0, base + (1.0 if caps else 0.0) + 0.5 * max(0, emojis - 1))
 
 
 def run(cmd, cwd=None, timeout=None):
@@ -106,7 +125,9 @@ class LiveClipper:
         self.rec_done = threading.Event()
         self.ffmpeg: subprocess.Popen | None = None
         self.is_live = True
-        self.chat: deque[float] = deque(maxlen=20000)   # wall times of laughing chat messages
+        # laughing chat messages: (posted wall time, strength, seconds into the video or None when live)
+        self.chat: deque[tuple] = deque(maxlen=20000)
+        self.first_pts = None                           # stream time of the first chunk (maps replay chat)
         self.chat_all = 0
         self.chat_started = 0.0
         self.history: list[float] = []
@@ -291,9 +312,14 @@ class LiveClipper:
 
     def _chat_line(self, line: bytes):
         try:
-            actions = json.loads(line)["replayChatItemAction"]["actions"]
+            action = json.loads(line)["replayChatItemAction"]
+            actions = action["actions"]
         except Exception:
             return
+        try:                                            # where in the video it was posted (replays)
+            offset = int(action["videoOffsetTimeMsec"]) / 1000.0
+        except (KeyError, TypeError, ValueError):
+            offset = None
         for act in actions:
             item = (act.get("addChatItemAction") or {}).get("item") or {}
             msg = item.get("liveChatTextMessageRenderer") or item.get("liveChatPaidMessageRenderer")
@@ -304,11 +330,13 @@ class LiveClipper:
                 emoji = r.get("emoji") or {}
                 text += r.get("text") or (emoji.get("emojiId", "") + " ".join(emoji.get("shortcuts", [])))
             self.chat_all += 1
-            if CHAT_LAUGH.search(text):
+            weight = chat_weight(text)
+            if weight:
                 try:
-                    self.chat.append(int(msg["timestampUsec"]) / 1e6)
+                    posted = int(msg["timestampUsec"]) / 1e6
                 except Exception:
-                    self.chat.append(time.time())
+                    posted = time.time()
+                self.chat.append((posted, weight, offset))
 
     # ------------------------------------------------------------- processing
     def _load_models(self):
@@ -478,6 +506,8 @@ class LiveClipper:
         if c.dur < 2:
             return None
         c.wall = f.stat().st_ctime
+        if self.first_pts is None:
+            self.first_pts = c.pts
         wav = f.with_suffix(".wav")
         r = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", f.name, "-vn",
                  "-ac", "1", "-ar", "16000", wav.name], cwd=self.work, timeout=300)
@@ -544,16 +574,22 @@ class LiveClipper:
         loud = smooth(np.clip((db - med) / mad, 0, 6), 2.0)
 
         tagged = all(c.sounds is not None for c, _ in chunks)
+        laugh_kind = [None] * nb                        # (kind, seconds) of the laugh around each bin
         if tagged:                                      # the laughter detector heard this whole window
-            snd = {k: np.zeros(nb) for k in ("laugh", "applause", "music")}
+            snd = {k: np.zeros(nb) for k in ("laugh", "big", "applause", "music")}
             for c, o in chunks:
                 i0 = int((o + c.aoff) / GRID)
                 for k, arr in snd.items():
-                    part = c.sounds[k][: max(0, nb - i0)]
+                    part = c.sounds.get(k, np.zeros(0))[: max(0, nb - i0)]
                     arr[i0:i0 + len(part)] = np.maximum(arr[i0:i0 + len(part)], part)
             cheer = np.maximum(snd["applause"], snd["music"])
             loud = loud * (1 - np.clip((cheer - 0.2) / 0.3, 0, 1))   # applause and music are not reactions
-            laugh = smooth(4.0 * np.clip((snd["laugh"] - 0.03) / 0.12, 0, 1), 2.0)
+            laugh = np.zeros(nb)
+            for i, j, kind, secs in laugh_events(snd["laugh"], snd["big"], (db - med) / mad):
+                a_, b_ = max(0, i - 2), min(nb, j + 2)  # a second either side: setup and aftermath
+                for k in range(a_, b_):
+                    if LAUGH_POINTS[kind] > laugh[k]:
+                        laugh[k], laugh_kind[k] = LAUGH_POINTS[kind], (kind, secs)
         else:                                           # no detector: loud while nobody talks
             speaking = np.zeros(nb, dtype=bool)
             for w in words:
@@ -573,18 +609,31 @@ class LiveClipper:
                 bump(text, b, 0.6, 2.0)
 
         chat = np.zeros(nb)
-        if self.chat_started and self.is_live:
+        entries = list(self.chat)
+        if self.chat_started and entries:
             lag = 6.0                                   # viewers react a few seconds after the moment
-            times = np.array(self.chat, dtype=float)
-            base_span = max(60.0, time.time() - self.chat_started)
-            base = len(times) / base_span * 8.0         # expected laugh messages per 8 s
-            for c, o in chunks:
-                local = times - c.wall - lag
-                for t in local[(local >= 0) & (local < c.dur)]:
-                    bump(chat, t + o, 1.0, 4.0, flat=True)
+            if self.is_live:                            # place by when the message was posted
+                placed = [(t, w) for t, w, _ in entries]
+                span = max(60.0, time.time() - self.chat_started)
+                total = sum(w for _, w in placed)
+                starts = [c.wall for c, _ in chunks]
+            else:                                       # replay: place by where it was posted in the video
+                first = self.first_pts if self.first_pts is not None else chunks[0][0].pts
+                video_end = chunks[-1][0].pts - first + chunks[-1][0].dur
+                placed = [(off, w) for _, w, off in entries if off is not None]
+                span = max(60.0, video_end)
+                total = sum(w for off, w in placed if off <= video_end)
+                starts = [c.pts - first for c, _ in chunks]
+            for (c, o), start in zip(chunks, starts):
+                for t, w in placed:
+                    local = t - start - lag
+                    if 0 <= local < c.dur:
+                        bump(chat, local + o, w, 4.0, flat=True)
+            base = total / span * 8.0                   # usual laughing per 8 s in this stream
             chat = np.clip((chat - base) / (np.sqrt(base) + 1.0), 0, 6)
 
-        score = smooth(loud + 1.2 * laugh + 1.5 * text + 1.5 * chat, 3.0)
+        laugh_weight = 1.0 if tagged else 1.2           # tagged laughs are already graded by strength
+        score = smooth(loud + laugh_weight * laugh + 1.5 * text + 1.5 * chat, 3.0)
         a, b = int(lo / GRID), max(int(lo / GRID) + 1, int(hi / GRID))
 
         moments = []
@@ -607,10 +656,14 @@ class LiveClipper:
                     break
                 p = i * GRID
                 why = []
+                near_laugh = [laugh_kind[k] for k in range(max(0, i - 6), min(nb, i + 7)) if laugh_kind[k]]
+                if near_laugh:                          # strongest laugh within 3 s of the peak
+                    kind, secs = max(near_laugh, key=lambda ks: LAUGH_POINTS[ks[0]])
+                    why.append(f"{kind} ({secs:.0f} s)")
+                elif laugh[i] >= 1.2:
+                    why.append("laughter or cheering")
                 if loud[i] >= 1.5:
                     why.append("loud burst")
-                if laugh[i] >= 1.2:
-                    why.append("laughter" if tagged else "laughter or cheering")
                 if text[i] >= 0.8:
                     near = sorted({h for t, h in hits if abs(t - p) < 6})
                     why.append("laugh words" + (f" ({', '.join(near[:3])})" if near else ""))
@@ -702,6 +755,32 @@ class LiveClipper:
 
 
 # ------------------------------------------------------------------- helpers
+LAUGH_POINTS = {"chuckle": 3.0, "laugh": 4.5, "big laugh": 6.5}   # Generous / Balanced / Only the best
+
+
+def laugh_events(laugh: np.ndarray, big: np.ndarray, loud_z: np.ndarray) -> list[tuple]:
+    """Runs of laughter as (first bin, end bin, kind, seconds). A big laugh is a belly laugh, long
+    and clear laughter, or laughter much louder than the stream; a chuckle is short and faint."""
+    out, i, n = [], 0, len(laugh)
+    while i < n:
+        if laugh[i] < 0.08:
+            i += 1
+            continue
+        j = i
+        while j < n and laugh[j] >= 0.08:
+            j += 1
+        secs, peak = (j - i) * GRID, float(laugh[i:j].max())
+        if big[i:j].max() >= 0.2 or (secs >= 3 and peak >= 0.2) or (secs >= 2 and loud_z[i:j].max() >= 3):
+            kind = "big laugh"
+        elif secs < 1.5 and peak < 0.15:
+            kind = "chuckle"
+        else:
+            kind = "laugh"
+        out.append((i, j, kind, secs))
+        i = j
+    return out
+
+
 def _wordish(ch: str) -> bool:
     """Letters, digits and combining marks. Vowel signs in Hindi and other Indian scripts are
     combining marks, which regex \\w does not match, so \\w-based cleaning cut them off."""

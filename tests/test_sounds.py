@@ -44,7 +44,7 @@ def test_silence_tags_nothing(tagger):
 
 def test_one_value_per_grid_bin(tagger):
     t = tagger.tag(np.zeros(16000 * 10, np.float32), grid=0.5)
-    assert set(t) == {"laugh", "applause", "music", "speech"}
+    assert set(t) == {"laugh", "big", "applause", "music", "speech"}
     assert all(len(v) == 20 for v in t.values())
 
 

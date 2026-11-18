@@ -27,6 +27,7 @@ DEFAULT_DIR = Path.home() / ".live-clipper" / "models" / "yamnet"
 # AudioSet class indices in YAMNet's 521-class output
 CLASSES = {
     "laugh": [13, 14, 15, 16, 17, 18],      # Laughter, Baby laughter, Giggle, Snicker, Belly laugh, Chuckle
+    "big": [17],                            # Belly laugh: someone laughing really hard
     "applause": [58, 61, 62],               # Clapping, Cheering, Applause
     "music": [132],                         # Music
     "speech": [0],                          # Speech

@@ -1,5 +1,6 @@
 """A loud burst between two lines only counts as funny when it is laughter. Applause and music
 (an intro, a walk-on) no longer make clips. Without the sound model the old rule still works."""
+import time
 from pathlib import Path
 
 import numpy as np
@@ -13,30 +14,34 @@ NB = int(DUR / clipper.GRID)
 BURST = (30.0, 34.0)                                       # loud, nobody talking
 
 
-def make_chunk(laugh=0.0, applause=0.0, music=0.0, with_sounds=True) -> clipper.Chunk:
+def make_chunk(laugh=0.0, applause=0.0, music=0.0, with_sounds=True, big=0.0, burst=BURST,
+               burst_db=-10.0) -> clipper.Chunk:
     c = clipper.Chunk(Path("s0_00000.ts"), 0, 0, pts=0.0, dur=DUR)
     t = 0.0
     while t < DUR - 3:
-        if BURST[0] - 3 < t < BURST[1]:
-            t = BURST[1]
+        if burst[0] - 3 < t < burst[1]:
+            t = burst[1]
             continue
         words = [clipper.Word(t + k * 0.5, t + k * 0.5 + 0.45, w) for k, w in enumerate("this is a line of talk.".split())]
         c.words += words
         c.segments.append((t, t + 3.0, "This is a line of talk."))
         t += 3.0
     c.db = np.full(NB, -25.0)
-    b0, b1 = int(BURST[0] / clipper.GRID), int(BURST[1] / clipper.GRID)
-    c.db[b0:b1] = -10.0
+    b0, b1 = int(burst[0] / clipper.GRID), int(burst[1] / clipper.GRID)
+    c.db[b0:b1] = burst_db
     if with_sounds:
-        c.sounds = {k: np.zeros(NB) for k in ("laugh", "applause", "music", "speech")}
+        c.sounds = {k: np.zeros(NB) for k in ("laugh", "big", "applause", "music", "speech")}
         c.sounds["laugh"][b0:b1] = laugh
+        c.sounds["big"][b0:b1] = big
         c.sounds["applause"][b0:b1] = applause
         c.sounds["music"][b0:b1] = music
     return c
 
 
-def moments(tmp_path, chunk) -> list:
-    c = make_clipper(tmp_path, tmp_path, sensitivity="medium")
+def moments(tmp_path, chunk, sensitivity="medium", setup=None) -> list:
+    c = make_clipper(tmp_path, tmp_path, sensitivity=sensitivity)
+    if setup:
+        setup(c)
     made = []
     c._make_clip = lambda chs, s, e, words, m: made.append((s, e, m))
     c._analyse(None, chunk, final=True)
@@ -48,7 +53,7 @@ def test_laughter_after_a_line_is_a_moment(tmp_path):
     assert len(made) == 1
     s, e, m = made[0]
     assert s < BURST[0] < e
-    assert "laughter" in m["reason"]
+    assert "laugh" in m["reason"]
 
 
 def test_applause_is_not_a_moment(tmp_path):
@@ -75,3 +80,60 @@ def test_clip_ends_on_a_sentence_inside_a_long_segment(tmp_path):
 
 def test_without_sound_model_old_rule_still_works(tmp_path):
     assert len(moments(tmp_path, make_chunk(with_sounds=False))) == 1
+
+
+def test_big_laugh_is_labelled(tmp_path):
+    made = moments(tmp_path, make_chunk(laugh=0.3, big=0.4))
+    assert len(made) == 1
+    assert made[0][2]["reason"].startswith("big laugh")
+
+
+def test_short_quiet_chuckle_only_on_generous(tmp_path):
+    chuckle = dict(laugh=0.12, burst=(30.0, 31.0), burst_db=-25.0)
+    assert moments(tmp_path, make_chunk(**chuckle), sensitivity="medium") == []
+    made = moments(tmp_path, make_chunk(**chuckle), sensitivity="high")
+    assert len(made) == 1
+    assert made[0][2]["reason"].startswith("chuckle")
+
+
+def test_normal_laugh_not_clipped_on_only_the_best(tmp_path):
+    assert moments(tmp_path, make_chunk(laugh=0.2, burst=(30.0, 32.0), burst_db=-25.0), sensitivity="low") == []
+
+
+QUIET = dict(burst=(30.0, 31.0), burst_db=-25.0)     # nothing in the audio: only chat can make the moment
+
+
+def test_replay_chat_burst_makes_a_moment(tmp_path):
+    def setup(c):
+        c.is_live = False
+        c.first_pts = 0.0
+        c.chat_started = time.time() - 60
+        c.chat.extend((0.0, 1.0, t) for t in (3, 12, 20, 45, 50, 57))          # normal background chat
+        c.chat.extend((0.0, 3.0, 36.0 + k * 0.4) for k in range(10))        # strong burst ~6 s after the joke
+    made = moments(tmp_path, make_chunk(**QUIET), setup=setup)
+    assert len(made) == 1
+    s, e, m = made[0]
+    assert s < 31.0 < e
+    assert "chat" in m["reason"]
+
+
+def test_live_chat_burst_makes_a_moment(tmp_path):
+    def setup(c):
+        c.is_live = True
+        c.chat_started = time.time() - 600
+        c.chat.extend((1000.0 + t, 1.0, None) for t in (3, 12, 20, 45, 50, 57))
+        c.chat.extend((1036.0 + k * 0.4, 3.0, None) for k in range(10))
+    chunk = make_chunk(**QUIET)
+    chunk.wall = 1000.0
+    made = moments(tmp_path, chunk, setup=setup)
+    assert len(made) == 1
+    assert "chat" in made[0][2]["reason"]
+
+
+def test_mild_chat_alone_is_not_a_moment(tmp_path):
+    def setup(c):
+        c.is_live = False
+        c.first_pts = 0.0
+        c.chat_started = time.time() - 60
+        c.chat.extend((0.0, 1.0, float(t)) for t in range(0, 60, 4))         # steady lol every 4 s
+    assert moments(tmp_path, make_chunk(**QUIET), setup=setup) == []
