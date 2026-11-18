@@ -160,3 +160,22 @@ def test_moment_inside_the_previous_clip_is_skipped(tmp_path):
     def setup(c):
         c.last_clip_end = 40.0                       # the laugh at 30-34 s is already in the last clip
     assert moments(tmp_path, make_chunk(laugh=0.3), setup=setup) == []
+
+
+def test_laugh_heavy_stream_raises_the_bar(tmp_path):
+    def setup(c):
+        c.history = [9.0, 9.5, 8.8, 9.2]               # every minute so far had a big laugh
+    assert moments(tmp_path, make_chunk(laugh=0.2, burst=(30.0, 32.0), burst_db=-25.0), setup=setup) == []
+
+
+def test_quiet_stream_lowers_the_bar(tmp_path):
+    def setup(c):
+        c.history = [1.0, 1.2, 0.8, 1.1]               # nothing much happens on this stream
+    chuckle = dict(laugh=0.12, burst=(30.0, 31.0), burst_db=-25.0)
+    assert len(moments(tmp_path, make_chunk(**chuckle), setup=setup)) == 1
+
+
+def test_short_laugh_label(tmp_path):
+    made = moments(tmp_path, make_chunk(laugh=0.3, burst=(30.0, 30.5), burst_db=-10.0))
+    assert len(made) == 1
+    assert "(0 s)" not in made[0][2]["reason"]

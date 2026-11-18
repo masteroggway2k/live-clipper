@@ -129,6 +129,8 @@ class LiveClipper:
         self.chat: deque[tuple] = deque(maxlen=20000)
         self.first_pts = None                           # stream time of the first chunk (maps replay chat)
         self.last_clip_end = None                       # stream time where the latest clip ends
+        self.retry_wait = 10.0                          # seconds between reconnect attempts
+        self.max_retries = 30                           # give up after ~5 minutes without the stream
         self.chat_all = 0
         self.chat_started = 0.0
         self.history: list[float] = []
@@ -198,13 +200,15 @@ class LiveClipper:
                         else:
                             self.log(BOT_CHECK_HELP)
                         return
-                    if session == 0 or failures >= 3:
-                        if session == 0:
-                            self._fail(f"Could not open that link: {msg}")
-                        else:
-                            self.log(f"Stream is no longer available ({msg[:120]}).")
+                    if session == 0:
+                        self._fail(f"Could not open that link: {msg}")
                         return
-                    time.sleep(10)
+                    if failures >= self.max_retries:   # about 5 minutes without a working stream
+                        self.log(f"Stream is no longer available ({msg[:120]}).")
+                        return
+                    if failures == 1:
+                        self.log("Lost the stream, waiting for the internet connection or the stream to come back...")
+                    time.sleep(self.retry_wait)
                     continue
                 self.is_live = bool(info.get("is_live"))
                 with self.lock:
@@ -258,7 +262,7 @@ class LiveClipper:
                     failures = 0
                 self.log(f"Recording was interrupted after {ran:.0f}s ({err_text[0][:120] or 'no error message'}), reconnecting...")
                 session += 1
-                time.sleep(5)
+                time.sleep(self.retry_wait / 2)
         finally:
             self.rec_done.set()
 
@@ -649,8 +653,9 @@ class LiveClipper:
             zone[b:] = -1
             peak = float(zone.max())
             need = THRESHOLDS[self.s.sensitivity]
-            if len(self.history) >= 3:                  # judge each stream against its own recent minutes
-                need = min(need, max(FLOOR, float(np.quantile(self.history[-30:], QUANTILE[self.s.sensitivity]))))
+            if len(self.history) >= 3:                  # judge each stream against its own recent minutes:
+                # stricter on laugh-heavy streams, more lenient on quiet ones
+                need = max(FLOOR, float(np.quantile(self.history[-30:], QUANTILE[self.s.sensitivity])))
             self.history.append(peak)
             self.log(f"   best moment in this stretch scored {peak:.1f} (a clip needs {need:.1f}).")
             for _ in range(2):
@@ -665,7 +670,7 @@ class LiveClipper:
                 near_laugh = [laugh_kind[k] for k in range(max(0, i - 6), min(nb, i + 7)) if laugh_kind[k]]
                 if near_laugh:                          # strongest laugh within 3 s of the peak
                     kind, secs = max(near_laugh, key=lambda ks: LAUGH_POINTS[ks[0]])
-                    why.append(f"{kind} ({secs:.0f} s)")
+                    why.append(f"{kind} ({secs:.0f} s)" if secs >= 1 else f"{kind} (<1 s)")
                 elif laugh[i] >= 1.2:
                     why.append("laughter or cheering")
                 if loud[i] >= 1.5:
