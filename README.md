@@ -8,7 +8,9 @@ Paste a YouTube live link and it keeps cutting the funny moments into captioned 
 2. Paste the live stream link and press **Start clipping**.
 3. Clips appear on the page and are saved in `Videos\LiveClipper\<date and time>\`.
 
-A clip shows up roughly two to three minutes after the moment happened: the tool records in one-minute chunks and needs a little of what comes next so clips do not end mid-sentence.
+Each clip is 30 to 35 seconds: the setup, the punchline and the reaction, cut on whole sentences, and never repeating the previous clip. A clip shows up roughly two to three minutes after the moment happened: the tool records in one-minute chunks and needs a little of what comes next so clips do not end mid-sentence.
+
+Finished streams and ordinary videos work too: paste their link the same way. They are processed as fast as your internet connection allows, and stop by themselves at the end. If the connection drops during a live stream, the app keeps trying for about five minutes before giving up.
 
 Needs Python 3.10+ and FFmpeg (`winget install Gyan.FFmpeg`). An NVIDIA GPU is used automatically when there is one.
 
@@ -16,12 +18,17 @@ Needs Python 3.10+ and FFmpeg (`winget install Gyan.FFmpeg`). An NVIDIA GPU is u
 
 For every stretch of the stream it combines:
 
-- **Laughter**, heard by a small sound-recognition model (YAMNet) that tells laughter apart from applause, cheering and music, so an intro or walk-on music is not mistaken for a joke landing
+- **Laughter and how hard it is**, heard by a small sound-recognition model (YAMNet) that tells laughter apart from applause, cheering and music. Each laugh is graded by strength, length and loudness:
+  - **big laugh**: a belly laugh, three seconds or more of clear laughter, or laughter far louder than the stream usually is
+  - **laugh**: an ordinary laugh
+  - **chuckle**: short and faint
+- **Live chat reactions and how strong they are.** A mild reaction ("lol", "haha", one 😂) counts 1; a strong one ("LMAO", "ROFL", "dead", "hahahaha", 🤣, 💀, "हाहाहा", "clip it") counts 3; writing it in capitals adds 1 and each extra laugh emoji adds 0.5, up to 6. A spike well above the stream's usual chat counts. For finished streams the chat replay is used, placed where each message appeared in the video.
+- **Laugh words** spoken in the stream: haha, hehe, lol, lmao, rofl, hilarious, funny, laugh/laughing, joke, omg, bruh, wtf, crazy, insane, ridiculous, stupid, idiot, dead, dying, हाहा, मज़ाक, पागल
 - **Loud bursts** in the audio, ignored while the model hears applause or music
-- **Laugh words** in the speech ("haha", "lol", "funny", ...)
-- **Live chat**: spikes of viewers typing lol, 😂, 💀 and similar
 
-**How picky** sets how high that combined score must be. These signals find moments people laugh at; they cannot understand a joke nobody laughs at.
+**How picky** sets which laughs are enough: *Only the best* clips big laughs, *Balanced* clips laughs, *Generous* also clips chuckles. After the first few minutes the bar follows the stream itself, stricter on a stream full of laughs and more lenient on a quiet one, so you get its best moments rather than all of them. Each clip on the page says why it was picked, for example "big laugh (4 s) + chat laughing".
+
+These signals find moments people laugh at; they cannot understand a joke nobody laughs at.
 
 The laughter model (about 14 MB, MIT licence, from Qualcomm AI Hub) downloads the first time you start clipping and is checked against a fixed checksum before it is used. It runs on the CPU and takes well under a second per minute of stream. If it cannot be downloaded, the app falls back to treating any loud stretch without talking as laughter, and says so in the activity log.
 
