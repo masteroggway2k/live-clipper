@@ -26,7 +26,7 @@ import numpy as np
 CHUNK_SECONDS = 60
 GRID = 0.5            # seconds per scoring bin
 HOLD_BACK = 25.0      # seconds of "future" kept so a clip never runs off the recorded end
-MIN_CLIP, MAX_CLIP = 12.0, 45.0
+MIN_CLIP, MAX_CLIP = 30.0, 35.0     # whole setup + punchline + reaction, not a fragment
 THRESHOLDS = {"low": 6.0, "medium": 4.0, "high": 2.8}       # heuristic score needed
 QUANTILE = {"low": 0.85, "medium": 0.65, "high": 0.4}           # share of recent stretches a clip must beat
 FLOOR = 1.8                                                  # never clip below this, however quiet the stream
@@ -128,6 +128,7 @@ class LiveClipper:
         # laughing chat messages: (posted wall time, strength, seconds into the video or None when live)
         self.chat: deque[tuple] = deque(maxlen=20000)
         self.first_pts = None                           # stream time of the first chunk (maps replay chat)
+        self.last_clip_end = None                       # stream time where the latest clip ends
         self.chat_all = 0
         self.chat_started = 0.0
         self.history: list[float] = []
@@ -636,9 +637,11 @@ class LiveClipper:
         score = smooth(loud + laugh_weight * laugh + 1.5 * text + 1.5 * chat, 3.0)
         a, b = int(lo / GRID), max(int(lo / GRID) + 1, int(hi / GRID))
 
+        # never repeat what the previous clip already showed
+        floor = max(0.0, self.last_clip_end - chunks[0][0].pts) if self.last_clip_end is not None else 0.0
         moments = []
         if self.judge and words:
-            moments = self._ask_judge(words, segs, lo, hi, win_end, loud, chat)
+            moments = self._ask_judge(words, segs, lo, hi, win_end, loud, chat, floor)
         if moments is None or (not self.judge):
             moments = []
             zone = score.copy()
@@ -655,6 +658,9 @@ class LiveClipper:
                 if zone[i] < need:
                     break
                 p = i * GRID
+                if p < floor + 2.0:                     # this laugh is already in the previous clip
+                    zone[max(0, i - int(30 / GRID)): i + int(30 / GRID)] = -1
+                    continue
                 why = []
                 near_laugh = [laugh_kind[k] for k in range(max(0, i - 6), min(nb, i + 7)) if laugh_kind[k]]
                 if near_laugh:                          # strongest laugh within 3 s of the peak
@@ -669,7 +675,8 @@ class LiveClipper:
                     why.append("laugh words" + (f" ({', '.join(near[:3])})" if near else ""))
                 if chat[i] >= 0.8:
                     why.append("chat laughing")
-                s, e = snap(sentences(words) or segs, p - 13.0, p + 8.0, win_end)
+                # ~22 s of setup before the reaction and ~10 s after it
+                s, e = snap(sentences(words) or segs, p - 22.0, p + 10.0, win_end, floor=floor)
                 moments.append({"start": s, "end": e, "score": round(float(zone[i]), 1),
                                 "title": "", "reason": " + ".join(why) or "energy spike"})
                 zone[max(0, i - int(30 / GRID)): i + int(30 / GRID)] = -1
@@ -678,20 +685,27 @@ class LiveClipper:
             self.trace(dict(lo=lo, hi=hi, win_end=win_end, words=words, segs=segs, db=db, loud=loud,
                             laugh=laugh, text=text, chat=chat, score=score, moments=[dict(m) for m in moments],
                             need=locals().get("need"), peak=locals().get("peak")))
-        for m in moments:
-            s, e = max(0.0, m["start"]), min(win_end, m["end"])
-            if e - s < MIN_CLIP:
-                s = max(0.0, e - MIN_CLIP)
+        taken = []
+        for m in sorted(moments, key=lambda m: m["start"]):
+            s, e = max(floor, m["start"]), min(win_end, m["end"])
+            if e - s < MIN_CLIP:                        # last resort when no sentence edges fit
+                s = max(floor, e - MIN_CLIP)
+                e = min(win_end, max(e, s + MIN_CLIP))
             if e - s > MAX_CLIP:
                 s = e - MAX_CLIP
+            if any(min(e, b) - max(s, a) > 3.0 for a, b in taken):
+                continue                                # mostly the same as a clip made just now
             clip_words = [w for w in words if w.end > s and w.start < e]
             if len(clip_words) < 5:
                 continue                                # nothing to caption (music, silence)
             self._make_clip([c for c, _ in chunks], s, e, clip_words, m)
+            taken.append((s, e))
+            self.last_clip_end = chunks[0][0].pts + e
+            floor = max(floor, e)
         with self.lock:
             self.stats["analysed"] += cur.dur
 
-    def _ask_judge(self, words, segs, lo, hi, win_end, loud, chat):
+    def _ask_judge(self, words, segs, lo, hi, win_end, loud, chat, floor: float = 0.0):
         lines = [f"[{a:6.1f}-{b:6.1f}] {t}" for a, b, t in segs]
         spikes = [f"{i * GRID:.0f}s" for i in peaks(loud, 2.5)]
         chat_sp = [f"{i * GRID:.0f}s" for i in peaks(chat, 1.5)]
@@ -704,8 +718,9 @@ class LiveClipper:
         out = []
         need = JUDGE_MIN_SCORE[self.s.sensitivity]
         for m in found:
-            if m["score"] >= need and lo <= (m["start"] + m["end"]) / 2 < hi + 5:
-                s, e = snap(sentences(words) or segs, m["start"], m["end"], win_end)
+            middle = (m["start"] + m["end"]) / 2
+            if m["score"] >= need and lo <= middle < hi + 5 and middle >= floor + 2.0:
+                s, e = snap(sentences(words) or segs, m["start"], m["end"], win_end, floor=floor)
                 out.append({"start": s, "end": e, "score": m["score"], "title": m["title"],
                             "reason": m.get("why", "picked by Claude")})
         return out
@@ -859,12 +874,15 @@ def sentences(words: list[Word]) -> list[tuple]:
 
 
 def snap(segs, s: float, e: float, win_end: float,
-         min_len: float = MIN_CLIP, max_len: float = MAX_CLIP):
+         min_len: float = MIN_CLIP, max_len: float = MAX_CLIP, floor: float = 0.0):
     """Move clip edges to sentence boundaries so clips do not start or end mid-sentence.
     Speech segments are not sentences (a third end on a comma or mid-phrase), so prefer
     boundaries where a sentence really ends; use any segment edge only when none is near.
     Of the candidate edges, take the pair closest to the requested ones that keeps the clip
-    between min_len and max_len, so a later length clamp does not cut into a sentence."""
+    between min_len and max_len, so a later length clamp does not cut into a sentence.
+    Nothing before `floor` is used (it is already in the previous clip)."""
+    if s < floor:                                       # slide the whole request past the previous clip
+        s, e = floor, e + (floor - s)
     s, e = max(0.0, s), min(win_end, e)
     segs = sorted(segs)
     is_end = [bool(SENTENCE_END.search(t.strip())) for _, _, t in segs]
@@ -886,7 +904,7 @@ def snap(segs, s: float, e: float, win_end: float,
         after = [a for a in seg_starts if a >= b - 1e-6]
         return min(0.5, max(0.0, min(after) - b - 0.05)) if after else 0.5
 
-    s_opts = [max(0.0, a - start_pad(a)) for a in starts] or [s]
+    s_opts = [x for x in (max(0.0, a - start_pad(a)) for a in starts) if x >= floor - 1e-6] or [max(s, floor)]
     e_opts = [min(win_end, b + end_pad(b)) for b in ends] or [e]
     pairs = sorted(((abs(a - s) + abs(b - e), a, b) for a in s_opts for b in e_opts), key=lambda p: p[0])
     fitting = [p for p in pairs if min_len <= p[2] - p[1] <= max_len]

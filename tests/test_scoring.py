@@ -137,3 +137,26 @@ def test_mild_chat_alone_is_not_a_moment(tmp_path):
         c.chat_started = time.time() - 60
         c.chat.extend((0.0, 1.0, float(t)) for t in range(0, 60, 4))         # steady lol every 4 s
     assert moments(tmp_path, make_chunk(**QUIET), setup=setup) == []
+
+
+def test_clips_are_30_to_35_seconds(tmp_path):
+    made = moments(tmp_path, make_chunk(laugh=0.3))
+    assert len(made) == 1
+    s, e, _ = made[0]
+    assert 30.0 <= e - s <= 35.0
+
+
+def test_clip_does_not_repeat_the_previous_clip(tmp_path):
+    def setup(c):
+        c.last_clip_end = 22.0                       # a clip already covered the stream up to 22 s
+    made = moments(tmp_path, make_chunk(laugh=0.3), setup=setup)
+    assert len(made) == 1
+    s, e, _ = made[0]
+    assert s >= 22.0
+    assert 30.0 <= e - s <= 35.0
+
+
+def test_moment_inside_the_previous_clip_is_skipped(tmp_path):
+    def setup(c):
+        c.last_clip_end = 40.0                       # the laugh at 30-34 s is already in the last clip
+    assert moments(tmp_path, make_chunk(laugh=0.3), setup=setup) == []

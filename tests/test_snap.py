@@ -39,16 +39,16 @@ def test_edges_land_on_sentences():
 
 def test_short_pick_grows_to_min_length_on_sentences():
     # a 12.5 s judge pick that sentence snapping would shrink to 11.65 s (then clamped mid-sentence)
-    s, e = clipper.snap(SEGS, 14.0, 26.5, WIN_END)
-    assert e - s >= clipper.MIN_CLIP
+    s, e = clipper.snap(SEGS, 14.0, 26.5, WIN_END, min_len=12.0, max_len=45.0)
+    assert e - s >= 12.0
     assert on_end(e, sentence_ends(SEGS))
     assert on_start(s, sentence_starts(SEGS))
 
 
 def test_long_pick_shrinks_to_max_length_on_sentences():
     segs = [(t, t + 3.0, f"Sentence {n}.") for n, t in enumerate(range(0, 90, 3))]
-    s, e = clipper.snap(segs, 10.0, 54.8, 90.0)              # nearest sentence edges would give 45.75 s
-    assert e - s <= clipper.MAX_CLIP
+    s, e = clipper.snap(segs, 10.0, 54.8, 90.0, min_len=12.0, max_len=45.0)   # nearest edges: 45.75 s
+    assert e - s <= 45.0
     assert on_end(e, sentence_ends(segs))
     assert on_start(s, sentence_starts(segs))
 
@@ -83,3 +83,9 @@ def test_sentence_end_pattern():
         assert clipper.SENTENCE_END.search(t), t
     for t in ["years,", "hands together"]:
         assert not clipper.SENTENCE_END.search(t), t
+
+
+def test_start_never_before_floor():
+    segs = [(t, t + 3.0, f"Sentence {n}.") for n, t in enumerate(range(0, 90, 3))]
+    s, e = clipper.snap(segs, 20.0, 52.0, 90.0, floor=24.0)
+    assert s >= 24.0
